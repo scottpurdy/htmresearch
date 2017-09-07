@@ -26,18 +26,19 @@ import csv
 
 import numpy as np
 
-ITERATIONS = 100000001
-ITERATIONS_PER_WORLD = 500
+ITERATIONS = 50000001
+ITERATIONS_PER_WORLD = 10000
 FEATURE_SIZE = (25, 25)
-NUM_FEATURES = 100
+NUM_FEATURES = 200
 LAYER_SIZE = 25
-MEMORY_LENGTH = 10
+MEMORY_LENGTH = 10000
 RIGHT, LEFT, UP, DOWN, RESET = range(5)
-RESET_CHANCE = 0.05
-# Use the same size for now
-LOC_SIZE = 125
-INCREMENT = 0.1
+RESET_CHANCE = 0.0
+LOC_SIZE = 25
+INCREMENT = 1.0
 DECREMENT = 0.03
+BOOST = 0.00001
+BOOST_DECAY = 0.0
 
 
 def getNextMotor(x, y):
@@ -80,21 +81,27 @@ def move(x, y, currentMotor):
     raise Exception('somethign went wrong')
 
 
-def selectLocation(loc, motor, transitions):
+def selectLocation(loc, motor, transitions, boosts):
   if motor == RESET:
     return np.random.randint(LOC_SIZE)
-  sortedCandidates = sorted(transitions[loc][motor].iteritems(), key=lambda pair: pair[1], reverse=True)
-  if sortedCandidates:
-    return sortedCandidates[0][0]
-  # If no known transitions, pick random new location
-  return np.random.randint(LOC_SIZE)
+  weights = np.copy(boosts)
+  for cell, perm in transitions[loc][motor].iteritems():
+    try:
+      weights[cell] += perm
+    except:
+      print cell
+      print perm
+      print weights
+      raise
+  return weights.argmax()
 
 
 def updateTransitions(oldLoc, motor, loc, transitions):
   keys = transitions[oldLoc][motor].keys()
   for k in keys:
     if k != loc:
-      transitions[oldLoc][motor][k] -= DECREMENT
+      #transitions[oldLoc][motor][k] -= DECREMENT
+      transitions[oldLoc][motor][k] = 0
       if transitions[oldLoc][motor][k] <= 0.0:
         del transitions[oldLoc][motor][k]
   transitions[oldLoc][motor][loc] += INCREMENT
@@ -105,15 +112,17 @@ def updateTransitions(oldLoc, motor, loc, transitions):
 def test(transitions):
   total = 0
   correct = 0
+  noBoosts = np.zeros((LOC_SIZE,), dtype=float)
   for loc in transitions:
     for pair in [
         (LEFT, RIGHT),
         (RIGHT, LEFT),
         (UP, DOWN),
         (DOWN, UP)]:
-      result = selectLocation(selectLocation(loc, pair[0], transitions), pair[1], transitions)
+      intermediate = selectLocation(loc, pair[0], transitions, noBoosts)
+      result = selectLocation(intermediate, pair[1], transitions, noBoosts)
       total += 1
-      if result == loc:
+      if result == loc and loc != intermediate:
         correct += 1
   return float(correct) / float(total)
 
@@ -149,10 +158,17 @@ def main():
     for j in xrange(4):
       transitions[i][j] = collections.defaultdict(float)
 
+  boosts = np.zeros((LOC_SIZE,), dtype=float)
+  nActive = np.zeros((LOC_SIZE,), dtype=int)
+
+
   for step in xrange(ITERATIONS):
     if (step % ITERATIONS_PER_WORLD) == 0:
       features = getWorld(NUM_FEATURES)
       # TODO: Do we need to do a reset or partial reset or is it ok for algo not to know?
+      # TODO: For now, we make it easier for the algorithm by resetting the buffer
+      history = []
+      count = collections.defaultdict(int)
     if (stats["n"] % 10000) == 0:
       statsOut.writerow((stats["n"], stats["noPrediction"], stats["badPrediction"], stats["goodPrediction"], test(transitions)))
     stats["n"] += 1
@@ -163,7 +179,7 @@ def main():
     featX, featY = move(featX, featY, currentMotor)
 
     oldLoc = loc
-    loc = selectLocation(loc, currentMotor, transitions)
+    loc = selectLocation(loc, currentMotor, transitions, boosts)
 
     if currentMotor == RESET:
       history = []
@@ -173,6 +189,7 @@ def main():
     feat = features[featX][featY]
 
     if count[feat] > 0:
+      #print "cycle!"
       if loc == memory[feat]:
         stats["goodPrediction"] += 1
       else:
@@ -181,10 +198,16 @@ def main():
       loc = memory[feat]
       updateTransitions(oldLoc, currentMotor, loc, transitions)
     else:
+      #print "no cycle!"
       if transitions[oldLoc][currentMotor]:
         stats["unknownPrediction"] += 1
       else:
         stats["noPrediction"] += 1
+
+    # Update boosting
+    boosts += BOOST
+    boosts[loc] *= BOOST_DECAY
+    nActive[loc] += 1
 
     # Add new feature to history, etc
     history.append(feat)
@@ -200,6 +223,18 @@ def main():
       #  del memory[feat]
 
   statsFile.close()
+  print "Duty cycles:"
+  for v in np.sort(nActive):
+    print float(v) / float(ITERATIONS)
+
+  print "Best transitions:"
+  for i in xrange(LOC_SIZE):
+    print
+    print "Loc", i
+    print "r", sorted(transitions[i][RIGHT].iteritems(), key=lambda x: x[1])[-1][0]
+    print "d", sorted(transitions[i][DOWN].iteritems(), key=lambda x: x[1])[-1][0]
+    print "l", sorted(transitions[i][LEFT].iteritems(), key=lambda x: x[1])[-1][0]
+    print "u", sorted(transitions[i][UP].iteritems(), key=lambda x: x[1])[-1][0]
 
 
 
