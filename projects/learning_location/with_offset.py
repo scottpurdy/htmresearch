@@ -28,8 +28,8 @@ import numpy as np
 
 ITERATIONS = 1000001
 RESET_CHANCE = 0.0
-RIGHT, LEFT, UP, DOWN, RESET = range(5)
-ITERATIONS_PER_WORLD = 10000
+RIGHT, LEFT, UP, DOWN, UP_RIGHT, DOWN_RIGHT, UP_LEFT, DOWN_LEFT, RESET = range(9)
+ITERATIONS_PER_WORLD = 100000
 
 FEATURE_SIZE = (25, 25)
 NUM_FEATURES = 200
@@ -40,10 +40,12 @@ OFFSET_SIZE = 3 ** 2
 
 LOC_WIDTH = 5
 LOC_SIZE = LOC_WIDTH ** 2
-INCREMENT = 1.0
-DECREMENT = 1.0
-BOOST = 0.00001
-BOOST_DECAY = 0.0
+
+INITIAL_WEIGHT = 0.2
+INCREMENT = 0.01
+DECREMENT = 0.005
+#BOOST = 0.00001
+#BOOST_DECAY = 0.0
 
 MEMORY_LENGTH = 10000
 REVERSE_MEM_LENGTH = 5
@@ -53,6 +55,10 @@ MOTOR_TXT = {
   LEFT: "left",
   UP: "up",
   DOWN: "down",
+  UP_RIGHT: "up+right",
+  UP_LEFT: "up+left",
+  DOWN_RIGHT: "down+right",
+  DOWN_LEFT: "down+left",
 }
 
 STARTING_MOTOR = list(
@@ -82,23 +88,29 @@ def createTransitions():
   return transitions
 
 
-def getNextMotor(x, y):
-  global STARTING_MOTOR
-  if STARTING_MOTOR:
-    motor = STARTING_MOTOR[0]
-    del STARTING_MOTOR[0]
-    return motor
-  if np.random.random() < RESET_CHANCE:
-    return RESET
+def getNextMotor(x, y, motorMap):
   candidates = []
-  if x > 0:
+  motorOptions = motorMap.keys()
+  if x > 0 and LEFT in motorOptions:
     candidates.append(LEFT)
-  elif x < (FEATURE_SIZE[0] - 1):
+  elif x < (FEATURE_SIZE[0] - 1) and RIGHT in motorOptions:
     candidates.append(RIGHT)
-  if y > 0:
+  if y > 0 and UP in motorOptions:
     candidates.append(UP)
-  elif y < (FEATURE_SIZE[1] - 1):
+  elif y < (FEATURE_SIZE[1] - 1) and DOWN in motorOptions:
     candidates.append(DOWN)
+  if x > 0 and y > 0 and UP_LEFT in motorOptions:
+    candidates.append(UP_LEFT)
+  if x < (FEATURE_SIZE[0] - 1) and y > 0 and UP_RIGHT in motorOptions:
+    candidates.append(UP_RIGHT)
+  if x > 0 and y < (FEATURE_SIZE[1] - 1) and DOWN_LEFT in motorOptions:
+    candidates.append(DOWN_LEFT)
+  if x < (FEATURE_SIZE[0] - 1) and y < (FEATURE_SIZE[1] - 1) and DOWN_RIGHT in motorOptions:
+    candidates.append(DOWN_RIGHT)
+
+  if len(candidates) == 0:
+    return None
+
   winner = np.random.randint(len(candidates))
   return candidates[winner]
 
@@ -120,6 +132,14 @@ def move(x, y, currentMotor):
     return (x, y - 1)
   elif currentMotor == DOWN:
     return (x, y + 1)
+  elif currentMotor == UP_RIGHT:
+    return (x + 1, y - 1)
+  elif currentMotor == UP_LEFT:
+    return (x - 1, y - 1)
+  elif currentMotor == DOWN_LEFT:
+    return (x - 1, y + 1)
+  elif currentMotor == DOWN_RIGHT:
+    return (x + 1, y + 1)
   elif currentMotor == RESET:
     return (np.random.randint(FEATURE_SIZE[0]),
             np.random.randint(FEATURE_SIZE[1]))
@@ -128,14 +148,12 @@ def move(x, y, currentMotor):
 
 
 def selectLocation(loc, motor, motorMap, transitions):
-  if motor == RESET:
-    return np.random.randint(LOC_SIZE)
-  offset = motorMap[motor].argmax()
+  offset = motorMap[motor][0]
   return transitions[loc][offset]
 
 
 def updateMotor(oldLoc, currentMotor, loc, motorMap, transitions):
-  currentOffset = motorMap[currentMotor].argmax()
+  currentOffset = motorMap[currentMotor][0]
   #print "OLD: {} {}".format(currentMotor, currentOffset)
   for offset, dest in transitions[oldLoc].iteritems():
     if dest == loc:
@@ -146,10 +164,25 @@ def updateMotor(oldLoc, currentMotor, loc, motorMap, transitions):
       break
 
 
+def addMotorMap(motorMap):
+  current = set(motorMap.keys())
+  options = set((LEFT, RIGHT, UP, DOWN, UP_RIGHT, UP_LEFT, DOWN_RIGHT, DOWN_LEFT)) - current
+  if len(options) == 0:
+    return
+  toAdd = list(options)[np.random.randint(len(options))]
+  offset = np.random.randint(OFFSET_SIZE)
+  motorMap[toAdd] = [offset, INITIAL_WEIGHT]
+  print "added {} to {}".format(MOTOR_TXT[toAdd], offset)
+
+
 def adjustMotorWeights(motorMap, currentMotor, newOffset):
-  motorMap[currentMotor] -= DECREMENT
-  motorMap[currentMotor][newOffset] += (INCREMENT + DECREMENT)
-  motorMap[currentMotor] = motorMap[currentMotor].clip(0.0, 1.0)
+  # Increment last motor mapping if the cycle is consistent, decrement otherwise
+  if motorMap[currentMotor][0] == newOffset:
+    motorMap[currentMotor][1] = min(motorMap[currentMotor][1] + INCREMENT, 1.0)
+  else:
+    motorMap[currentMotor][1] -= DECREMENT
+    if motorMap[currentMotor][1] < DECREMENT:
+      del motorMap[currentMotor]
 
 
 def test(motorMap, transitions):
@@ -162,9 +195,11 @@ def test(motorMap, transitions):
       (RIGHT, LEFT),
       (UP, DOWN),
       (DOWN, UP)]:
+    total += 1
+    if pair[0] not in motorMap or pair[1] not in motorMap:
+      continue
     intermediate = selectLocation(loc, pair[0], motorMap, transitions)
     result = selectLocation(intermediate, pair[1], motorMap, transitions)
-    total += 1
     if result == loc and loc != intermediate:
       correct += 1
   return float(correct) / float(total)
@@ -204,16 +239,14 @@ def main():
   #    print "{} {} {}".format(i, m, transitions[i][m])
 
   # Create mapping from motor command to offset
+  unmapped = [LEFT, RIGHT, UP, DOWN, UP_RIGHT, UP_LEFT, DOWN_RIGHT, DOWN_LEFT]
   motorMap = {}
-  for m in (LEFT, RIGHT, UP, DOWN):
-    motorMap[m] = np.zeros((OFFSET_SIZE,), dtype=float)
-    motorMap[m][np.random.randint(OFFSET_SIZE)] = 0.1
-  print motorMap
 
   # TODO: get rid of boosting
-  boosts = np.zeros((LOC_SIZE,), dtype=float)
+  #boosts = np.zeros((LOC_SIZE,), dtype=float)
   nActive = np.zeros((LOC_SIZE,), dtype=int)
 
+  lastAddedMotor = 0
   for step in xrange(ITERATIONS):
     if (step % ITERATIONS_PER_WORLD) == 0:
       features = getWorld(NUM_FEATURES)
@@ -227,7 +260,19 @@ def main():
       statsOut.writerow((stats["n"], stats["noPrediction"], stats["badPrediction"], stats["goodPrediction"], test(motorMap, transitions)))
     stats["n"] += 1
 
-    currentMotor = getNextMotor(featX, featY)
+    if lastAddedMotor < step - 1000:
+      addMotorMap(motorMap)
+      lastAddedMotor = step
+    # And make sure we always have at least 2
+    while len(motorMap) < 2:
+      addMotorMap(motorMap)
+      lastAddedMotor = step
+
+    currentMotor = getNextMotor(featX, featY, motorMap)
+    if currentMotor is None:
+      addMotorMap(motorMap)
+      lastAddedMotor = step
+      continue
 
     oldFeatX, oldFeatY = (featX, featY)
     featX, featY = move(featX, featY, currentMotor)
@@ -235,14 +280,16 @@ def main():
     oldLoc = loc
     loc = selectLocation(loc, currentMotor, motorMap, transitions)
 
-    if currentMotor == RESET:
-      history = []
-      count = collections.defaultdict(int)
-      reverseHistory = []
-      reversecount = collections.defaultdict(int)
-      continue
-
     feat = features[featX][featY]
+
+    if reverseCount[loc] > 0 and reverseMemory[loc] != feat:
+      # Uh oh, we think we know the right location but it can't be right!
+      motorMap[currentMotor][1] -= DECREMENT
+      if motorMap[currentMotor][1] < DECREMENT:
+        del motorMap[currentMotor]
+      featConsistent = False
+    else:
+      featConsistent = True
 
     if count[feat] > 0:
       #print "cycle!"
@@ -252,7 +299,8 @@ def main():
         stats["badPrediction"] += 1
       # TODO: Do we need to decrement only the current mistaken location or is it ok to keep decrementing all transitions for this motor command?
       loc = memory[feat]
-      updateMotor(oldLoc, currentMotor, loc, motorMap, transitions)
+      if featConsistent:
+        updateMotor(oldLoc, currentMotor, loc, motorMap, transitions)
     else:
       #print "no cycle!"
       if transitions[oldLoc][currentMotor]:
@@ -260,14 +308,6 @@ def main():
       else:
         stats["noPrediction"] += 1
 
-    if reverseCount[loc] > 0 and reverseMemory[loc] != feat:
-      # Uh oh, we think we know the right location but it can't be right!
-      # This motor-> offset isn't right so pick a random one
-      adjustMotorWeights(motorMap, currentMotor, np.random.randint(OFFSET_SIZE))
-
-    # Update boosting
-    #boosts += BOOST
-    #boosts[loc] *= BOOST_DECAY
     nActive[loc] += 1
 
     # Add new feature to history, etc
@@ -281,11 +321,14 @@ def main():
 
     # Pop oldest feature from history, etc. if we hit buffer limit
     if len(history) > MEMORY_LENGTH:
+      poppedFeat = history[0]
       del history[0]
-      count[feat] -= 1
-    if len(reverseHistory) > REVERSE_MEM_LENGTH:
+      count[poppedFeat] -= 1
+
+    if len(reverseHistory) > MEMORY_LENGTH:
+      poppedLoc = reverseHistory[0]
       del reverseHistory[0]
-      reverseCount[loc] -= 1
+      reverseCount[poppedLoc] -= 1
 
   statsFile.close()
   print motorMap
