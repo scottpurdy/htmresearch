@@ -1,7 +1,6 @@
 # ----------------------------------------------------------------------
-# Numenta Platform for Intelligent Computing (NuPIC)
-# Copyright (C) 2017, Numenta, Inc.  Unless you have an agreement
-# with Numenta, Inc., for a separate license for this software code, the
+# Numenta Platform for Intelligent Computing (NuPIC) # Copyright (C) 2017, Numenta, Inc.  Unless you have an agreement
+# with Numenta, Inc., for a separate license for self.software code, the
 # following terms and conditions apply:
 #
 # This program is free software: you can redistribute it and/or modify
@@ -14,7 +13,7 @@
 # See the GNU Affero Public License for more details.
 #
 # You should have received a copy of the GNU Affero Public License
-# along with this program.  If not, see http://www.gnu.org/licenses.
+# along with self.program.  If not, see http://www.gnu.org/licenses.
 #
 # http://numenta.org/licenses/
 # ----------------------------------------------------------------------
@@ -26,317 +25,307 @@ import csv
 
 import numpy as np
 
-ITERATIONS = 1000001
-RESET_CHANCE = 0.0
-RIGHT, LEFT, UP, DOWN, UP_RIGHT, DOWN_RIGHT, UP_LEFT, DOWN_LEFT, RESET = range(9)
-ITERATIONS_PER_WORLD = 100000
-
-FEATURE_SIZE = (25, 25)
-NUM_FEATURES = 200
-
-# Dimensions should be odd, middle element represents self-transition
-OFFSET_WIDTH = 3
-OFFSET_SIZE = 3 ** 2
-
-LOC_WIDTH = 5
-LOC_SIZE = LOC_WIDTH ** 2
-
-INITIAL_WEIGHT = 0.2
-INCREMENT = 0.01
-DECREMENT = 0.005
-#BOOST = 0.00001
-#BOOST_DECAY = 0.0
-
 MEMORY_LENGTH = 10000
-REVERSE_MEM_LENGTH = 5
-
-MOTOR_TXT = {
-  RIGHT: "right",
-  LEFT: "left",
-  UP: "up",
-  DOWN: "down",
-  UP_RIGHT: "up+right",
-  UP_LEFT: "up+left",
-  DOWN_RIGHT: "down+right",
-  DOWN_LEFT: "down+left",
-}
-
-STARTING_MOTOR = list(
-    ([UP, DOWN] * 20) +
-    ([LEFT, RIGHT] * 20) +
-    ([UP, RIGHT, DOWN, LEFT]) * 20
-)
 
 
-def createTransitions():
-  transitions = {}
-  offsetCenter = int(OFFSET_WIDTH / 2)
-  for i in xrange(LOC_WIDTH):
-    for j in xrange(LOC_WIDTH):
-      loc = (i * LOC_WIDTH) + j
 
-      transitions[loc] = {}
-
-      for oi in xrange(OFFSET_WIDTH):
-        for oj in xrange(OFFSET_WIDTH):
-          offset = (oi * OFFSET_WIDTH) + oj
-
-          destX = ((oi - offsetCenter) + i) % LOC_WIDTH
-          destY = ((oj - offsetCenter) + j) % LOC_WIDTH
-          dest = (destX * LOC_WIDTH) + destY
-          transitions[loc][offset] = dest
-  return transitions
+class Experiment(object):
 
 
-def getNextMotor(x, y, motorMap):
-  candidates = []
-  motorOptions = motorMap.keys()
-  if x > 0 and LEFT in motorOptions:
-    candidates.append(LEFT)
-  elif x < (FEATURE_SIZE[0] - 1) and RIGHT in motorOptions:
-    candidates.append(RIGHT)
-  if y > 0 and UP in motorOptions:
-    candidates.append(UP)
-  elif y < (FEATURE_SIZE[1] - 1) and DOWN in motorOptions:
-    candidates.append(DOWN)
-  if x > 0 and y > 0 and UP_LEFT in motorOptions:
-    candidates.append(UP_LEFT)
-  if x < (FEATURE_SIZE[0] - 1) and y > 0 and UP_RIGHT in motorOptions:
-    candidates.append(UP_RIGHT)
-  if x > 0 and y < (FEATURE_SIZE[1] - 1) and DOWN_LEFT in motorOptions:
-    candidates.append(DOWN_LEFT)
-  if x < (FEATURE_SIZE[0] - 1) and y < (FEATURE_SIZE[1] - 1) and DOWN_RIGHT in motorOptions:
-    candidates.append(DOWN_RIGHT)
+  def __init__(self, locationWidth, worldWidth, initialWeight, inc, dec):
+    self.locWidth = locationWidth
+    self.initialWeight = initialWeight
+    self.inc = inc
+    self.dec = dec
 
-  if len(candidates) == 0:
-    return None
+    # HARD-CODED ALGORITHM STATE
 
-  winner = np.random.randint(len(candidates))
-  return candidates[winner]
+    # Hard-coded list of possible location offsets identified by index
+    offsets = []
+    for i in xrange(-(locationWidth / 2), (locationWidth / 2) + 1):
+      for j in xrange(-(locationWidth / 2), (locationWidth / 2) + 1):
+        if i != 0 or j != 0:
+          offsets.append((i, j))
+    self.offsets = offsets
 
+    # Hard-coded mapping from motor command ID to real-world change
+    self.motorMap = dict([(i, offset) for i, offset in enumerate(self.offsets)])
 
-def getWorld(numFeatures):
-  return np.random.randint(numFeatures, size=np.prod(FEATURE_SIZE)).reshape(FEATURE_SIZE)
+    # LEARNED ALGORITHM STATE
 
+    # Learned mapping from motor command ID to [offset ID, permanence] pair
+    self.offsetMap = {}
+    for i in xrange(len(offsets)):
+      self.addOffset(i)
 
-def currentCell(x, y):
-  return (x * len(FEATURE_SIZE[0])) + y
+    # WORKING ALGORITHM STATE
 
+    # Current location cell
+    self.loc = [0, 0]
 
-def move(x, y, currentMotor):
-  if currentMotor == LEFT:
-    return (x - 1, y)
-  elif currentMotor == RIGHT:
-    return (x + 1, y)
-  elif currentMotor == UP:
-    return (x, y - 1)
-  elif currentMotor == DOWN:
-    return (x, y + 1)
-  elif currentMotor == UP_RIGHT:
-    return (x + 1, y - 1)
-  elif currentMotor == UP_LEFT:
-    return (x - 1, y - 1)
-  elif currentMotor == DOWN_LEFT:
-    return (x - 1, y + 1)
-  elif currentMotor == DOWN_RIGHT:
-    return (x + 1, y + 1)
-  elif currentMotor == RESET:
-    return (np.random.randint(FEATURE_SIZE[0]),
-            np.random.randint(FEATURE_SIZE[1]))
-  else:
-    raise Exception('somethign went wrong')
+    # Map from feature to most recent location
+    self.memory = {}
+    # How many instances of each feature are in the history
+    self.count = collections.defaultdict(int)
+    # List of features in short term memory
+    self.history = []
 
+    #self.reverseMemory = {}
+    #self.reverseHistory = []
+    #self.reverseCount = collections.defaultdict(int)
 
-def selectLocation(loc, motor, motorMap, transitions):
-  offset = motorMap[motor][0]
-  return transitions[loc][offset]
+    # WORLD STATE
 
+    # Current world position
+    self.pos = [0, 0]
 
-def updateMotor(oldLoc, currentMotor, loc, motorMap, transitions):
-  currentOffset = motorMap[currentMotor][0]
-  #print "OLD: {} {}".format(currentMotor, currentOffset)
-  for offset, dest in transitions[oldLoc].iteritems():
-    if dest == loc:
-      # Update the motor map so current motor maps to the correct offset from oldLoc to loc
-      #print "NEW: {} {}".format(currentMotor, offset)
-      #print
-      adjustMotorWeights(motorMap, currentMotor, offset)
-      break
+    # Build a world
+    sensoryInputs = range(worldWidth ** 2)
+    np.random.shuffle(sensoryInputs)
+    world = np.array(sensoryInputs, dtype=int)
+    world.resize((worldWidth, worldWidth))
+    self.world = world
+
+    # EXPERIMENT STATE
+
+    self.nActive = np.zeros((self.locWidth, self.locWidth), dtype=int)
+    self.stats = {
+        "n": 0,
+        "noPrediction": 0,
+        "unknownPrediction": 0,
+        "badPrediction": 0,
+        "goodPrediction": 0,
+    }
 
 
-def addMotorMap(motorMap):
-  current = set(motorMap.keys())
-  options = set((LEFT, RIGHT, UP, DOWN, UP_RIGHT, UP_LEFT, DOWN_RIGHT, DOWN_LEFT)) - current
-  if len(options) == 0:
-    return
-  toAdd = list(options)[np.random.randint(len(options))]
-  offset = np.random.randint(OFFSET_SIZE)
-  motorMap[toAdd] = [offset, INITIAL_WEIGHT]
-  print "added {} to {}".format(MOTOR_TXT[toAdd], offset)
+  def addOffset(self, i):
+    possibleOffsets = (self.locWidth ** 2) - 1
+    self.offsetMap[i] = [np.random.randint(possibleOffsets), self.initialWeight]
 
 
-def adjustMotorWeights(motorMap, currentMotor, newOffset):
-  # Increment last motor mapping if the cycle is consistent, decrement otherwise
-  if motorMap[currentMotor][0] == newOffset:
-    motorMap[currentMotor][1] = min(motorMap[currentMotor][1] + INCREMENT, 1.0)
-  else:
-    motorMap[currentMotor][1] -= DECREMENT
-    if motorMap[currentMotor][1] < DECREMENT:
-      del motorMap[currentMotor]
+  def getNextMotor(self):
+    candidates = []
+    for m in self.motorMap.keys():
+      xd, yd = self.motorMap[m]
+      x = self.pos[0] + xd
+      y = self.pos[1] + yd
+      if x >= 0 and y >= 0 and x < len(self.world[0]) and y < len(self.world):
+        # The first value is the square root of the permanence. The square
+        # root up-weights smaller values so they still have a chance of
+        # selection.
+        candidates.append((self.offsetMap[m][1] ** 2, m))
+
+    # Select a point in the cumulative weights
+    totalWeights = 0.0
+    for w, _ in candidates:
+      totalWeights += w
+    point = np.random.random() * totalWeights
+
+    # Find which motor command this corresponds to and return it
+    cum = 0.0
+    for w, m in candidates:
+      cum = cum + w
+      if cum > point:
+        return m
+    raise ValueError("Should never get here...")
 
 
-def test(motorMap, transitions):
-  total = 0
-  correct = 0
-  noBoosts = np.zeros((LOC_SIZE,), dtype=float)
-  loc = 0
-  for pair in [
-      (LEFT, RIGHT),
-      (RIGHT, LEFT),
-      (UP, DOWN),
-      (DOWN, UP)]:
-    total += 1
-    if pair[0] not in motorMap or pair[1] not in motorMap:
-      continue
-    intermediate = selectLocation(loc, pair[0], motorMap, transitions)
-    result = selectLocation(intermediate, pair[1], motorMap, transitions)
-    if result == loc and loc != intermediate:
-      correct += 1
-  return float(correct) / float(total)
+  def updatePos(self, currentMotor):
+    xd, yd = self.motorMap[currentMotor]
+    self.pos = (self.pos[0] + xd, self.pos[1] + yd)
 
 
-def main():
-  featX = 12
-  featY = 13
-  loc = 0
+  def updateLoc(self, currentMotor):
+    offset = self.offsetMap[currentMotor][0]
+    xd, yd = self.offsets[offset]
+    self.loc = [v % self.locWidth for v in (self.loc[0] + xd, self.loc[1] + yd)]
 
-  statsFile = open("stats.csv", "w")
-  statsOut = csv.writer(statsFile)
-  statsOut.writerow(("n", "no prediction", "bad cycle", "good cycle", "reciprocals"))
 
-  # Map from feature to most recent location
-  memory = {}
-  # How many instances of each feature are in the history
-  count = collections.defaultdict(int)
-  # List of features in short term memory
-  history = []
+  def adjustMotorWeights(self, currentMotor, newOffset):
+    """
 
-  reverseMemory = {}
-  reverseHistory = []
-  reverseCount = collections.defaultdict(int)
-
-  stats = {
-      "n": 0,
-      "noPrediction": 0,
-      "unknownPrediction": 0,
-      "badPrediction": 0,
-      "goodPrediction": 0,
-  }
-
-  transitions = createTransitions()
-  #for i in transitions:
-  #  for m in transitions[i]:
-  #    print "{} {} {}".format(i, m, transitions[i][m])
-
-  # Create mapping from motor command to offset
-  unmapped = [LEFT, RIGHT, UP, DOWN, UP_RIGHT, UP_LEFT, DOWN_RIGHT, DOWN_LEFT]
-  motorMap = {}
-
-  # TODO: get rid of boosting
-  #boosts = np.zeros((LOC_SIZE,), dtype=float)
-  nActive = np.zeros((LOC_SIZE,), dtype=int)
-
-  lastAddedMotor = 0
-  for step in xrange(ITERATIONS):
-    if (step % ITERATIONS_PER_WORLD) == 0:
-      features = getWorld(NUM_FEATURES)
-      # TODO: Do we need to do a reset or partial reset or is it ok for algo not to know?
-      # TODO: For now, we make it easier for the algorithm by resetting the buffer
-      history = []
-      count = collections.defaultdict(int)
-      reverseHistory = []
-      reversecount = collections.defaultdict(int)
-    if (stats["n"] % 10000) == 0:
-      statsOut.writerow((stats["n"], stats["noPrediction"], stats["badPrediction"], stats["goodPrediction"], test(motorMap, transitions)))
-    stats["n"] += 1
-
-    if lastAddedMotor < step - 1000:
-      addMotorMap(motorMap)
-      lastAddedMotor = step
-    # And make sure we always have at least 2
-    while len(motorMap) < 2:
-      addMotorMap(motorMap)
-      lastAddedMotor = step
-
-    currentMotor = getNextMotor(featX, featY, motorMap)
-    if currentMotor is None:
-      addMotorMap(motorMap)
-      lastAddedMotor = step
-      continue
-
-    oldFeatX, oldFeatY = (featX, featY)
-    featX, featY = move(featX, featY, currentMotor)
-
-    oldLoc = loc
-    loc = selectLocation(loc, currentMotor, motorMap, transitions)
-
-    feat = features[featX][featY]
-
-    if reverseCount[loc] > 0 and reverseMemory[loc] != feat:
-      # Uh oh, we think we know the right location but it can't be right!
-      motorMap[currentMotor][1] -= DECREMENT
-      if motorMap[currentMotor][1] < DECREMENT:
-        del motorMap[currentMotor]
-      featConsistent = False
+    :param newOffset: offset id of the offset that we expect to complete the cycle
+    """
+    currentOffset = self.offsetMap[currentMotor][0]
+    if self.offsets[currentOffset] == newOffset:
+      self.offsetMap[currentMotor][1] = min(self.offsetMap[currentMotor][1] + self.inc, 1.0)
     else:
-      featConsistent = True
+      self.offsetMap[currentMotor][1] -= self.dec
+      if self.offsetMap[currentMotor][1] < self.dec:
+        # Delete the current mapping completely and pick a random new mapping
+        del self.offsetMap[currentMotor]
+        self.addOffset(currentMotor)
 
-    if count[feat] > 0:
+
+  def printMotor(self):
+    for m, pair in self.offsetMap.iteritems():
+      worldOffset = self.motorMap[m]
+      locOffset = self.offsets[pair[0]]
+      print "{} maps to {}".format(",".join(str(v) for v in worldOffset),
+                                   ",".join(str(v) for v in locOffset))
+
+
+  def printWeightStats(self):
+    weights = sorted([pair[1] for pair in self.offsetMap.values()])
+    median = weights[len(weights) / 2]
+    total = 0.0
+    minVal = 1.0
+    maxVal = 0.0
+    for w in weights:
+      total += w
+      minVal = min(minVal, w)
+      maxVal = max(maxVal, w)
+    mean = total / float(len(weights))
+    print minVal, median, mean, maxVal
+
+
+  def runOne(self):
+    self.stats["n"] += 1
+
+    currentMotor = self.getNextMotor()
+
+    oldLoc = self.loc
+
+    self.updatePos(currentMotor)
+    self.updateLoc(currentMotor)
+
+    feat = self.world[self.pos[0]][self.pos[1]]
+
+    if self.count[feat] > 0:
+      # We have a cycle!
+
       #print "cycle!"
-      if loc == memory[feat]:
-        stats["goodPrediction"] += 1
+      if self.loc == self.memory[feat]:
+        self.stats["goodPrediction"] += 1
       else:
-        stats["badPrediction"] += 1
-      # TODO: Do we need to decrement only the current mistaken location or is it ok to keep decrementing all transitions for this motor command?
-      loc = memory[feat]
-      if featConsistent:
-        updateMotor(oldLoc, currentMotor, loc, motorMap, transitions)
-    else:
-      #print "no cycle!"
-      if transitions[oldLoc][currentMotor]:
-        stats["unknownPrediction"] += 1
-      else:
-        stats["noPrediction"] += 1
+        self.stats["badPrediction"] += 1
 
-    nActive[loc] += 1
+      # If our location doesn't match the expected
+      self.loc = self.memory[feat]
+
+      # Calculate what offset would have completed the cycle in location layer
+      newOffset = (self.loc[0] - oldLoc[0], self.loc[1] - oldLoc[1])
+      # Decrement the motor offset mapping if the cycle wasn't correct
+      self.adjustMotorWeights(currentMotor, newOffset)
+    else:
+      self.stats["unknownPrediction"] += 1
+
+    self.nActive[self.loc[0]][self.loc[1]] += 1
 
     # Add new feature to history, etc
-    history.append(feat)
-    count[feat] += 1
-    memory[feat] = loc
+    self.history.append(feat)
+    self.count[feat] += 1
+    self.memory[feat] = self.loc
 
-    reverseHistory.append(loc)
-    reverseCount[loc] += 1
-    reverseMemory[loc] = feat
+    #self.reverseHistory.append(self.loc)
+    #self.reverseCount[self.loc] += 1
+    #self.reverseMemory[self.loc] = feat
 
     # Pop oldest feature from history, etc. if we hit buffer limit
-    if len(history) > MEMORY_LENGTH:
-      poppedFeat = history[0]
-      del history[0]
-      count[poppedFeat] -= 1
+    if len(self.history) > MEMORY_LENGTH:
+      poppedFeat = self.history[0]
+      del self.history[0]
+      self.count[poppedFeat] -= 1
 
-    if len(reverseHistory) > MEMORY_LENGTH:
-      poppedLoc = reverseHistory[0]
-      del reverseHistory[0]
-      reverseCount[poppedLoc] -= 1
 
-  statsFile.close()
-  print motorMap
-  print "Duty cycles:"
-  for v in np.sort(nActive):
-    print float(v) / float(ITERATIONS)
+  @staticmethod
+  def computeBasisTransform(locOffset1, motorOffset1, locOffset2, motorOffset2):
+    locOffsetX1, locOffsetY1 = locOffset1
+    motorOffsetX1, motorOffsetY1 = motorOffset1
+    locOffsetX2, locOffsetY2 = locOffset2
+    motorOffsetX2, motorOffsetY2 = motorOffset2
+
+    # Solve system of equations to determine basis transform matrix
+    coefficients = [
+      [locOffsetX1, 0, locOffsetY1, 0],
+      [0, locOffsetX1, 0, locOffsetY1],
+      [locOffsetX2, 0, locOffsetY2, 0],
+      [0, locOffsetX2, 0, locOffsetY2],
+    ]
+    ordinates = [motorOffsetX1, motorOffsetY1, motorOffsetX2, motorOffsetY2]
+    try:
+      basisValues = np.linalg.solve(coefficients, ordinates)
+    except np.linalg.linalg.LinAlgError:
+      return None
+    basisTransform = basisValues.reshape((2, 2))
+    assert basisValues[0] == basisTransform[0][0]
+    assert basisValues[1] == basisTransform[0][1]
+    assert basisValues[2] == basisTransform[1][0]
+    assert basisValues[3] == basisTransform[1][1]
+
+    return basisTransform
+
+
+  def measureConsistency(self):
+    best = 0.0
+    bestTransform = None
+    for m1 in self.motorMap.keys():
+      for m2 in self.motorMap.keys():
+        # Find the basis transform for these two location/world offset pairs
+        locOffset1 = self.offsets[self.offsetMap[m1][0]]
+        motorOffset1 = self.motorMap[m1]
+        locOffset2 = self.offsets[self.offsetMap[m2][0]]
+        motorOffset2 = self.motorMap[m2]
+        basisTransform = self.computeBasisTransform(locOffset1, motorOffset1, locOffset2, motorOffset2)
+        if basisTransform is None:
+          continue
+
+        # Check how many mappings match this transform
+        n = 0
+        consistent = 0
+        for m in self.motorMap.keys():
+          n += 1
+          worldOffset = self.motorMap[m]
+          locOffset = self.offsets[self.offsetMap[m][0]]
+          transformed = np.dot(locOffset, basisTransform)
+          transformed = [((v + 1) % self.locWidth) - 1 for v in transformed]
+          if np.allclose(transformed, worldOffset):
+            consistent += 1
+        score = float(consistent) / float(n)
+        if score > best:
+          bestTransform = basisTransform
+        best = max(best, score)
+
+    return best, bestTransform
+
+
+
+def testParams(locationWidth, worldWidth, initialWeight, inc, dec):
+  iterationsToPerfect = []
+  numTrials = 10
+  for trial in xrange(numTrials):
+    exp = Experiment(
+      locationWidth=locationWidth,
+      worldWidth=worldWidth,
+      initialWeight=initialWeight,
+      inc=inc,
+      dec=dec,
+    )
+    for i in xrange(1000000):
+      exp.runOne()
+      if (i + 1) % 10000 == 0:
+        consistency, basisT = exp.measureConsistency()
+        if consistency > 0.99:
+          iterationsToPerfect.append(i)
+          break
+    else:
+      print "never got perfect"
+      iterationsToPerfect.append(i)
+  assert len(iterationsToPerfect) == numTrials
+  total = 0.0
+  for iterations in iterationsToPerfect:
+    total += float(iterations)
+  return total / float(numTrials)
 
 
 
 if __name__ == "__main__":
-  main()
+  paramSet = [
+    (3, 10, 0.05, 0.05, 0.01),
+    (3, 10, 0.05, 0.05, 0.02),
+  ]
+  for params in paramSet:
+    print "params: ", params
+    averageIterationsToPerfect = testParams(*params)
+    print "avg iterations: ", averageIterationsToPerfect
+    print
